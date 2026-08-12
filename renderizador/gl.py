@@ -6,15 +6,18 @@
 """
 Biblioteca Gráfica / Graphics Library.
 
-Desenvolvido por: <SEU NOME AQUI>
+Desenvolvido por: <Luigi Carmona de Miranda Lopes>
 Disciplina: Computação Gráfica
-Data: <DATA DE INÍCIO DA IMPLEMENTAÇÃO>
+Data: <12/08/2026>
 """
 
 import time         # Para operações com tempo
 import gpu          # Simula os recursos de uma GPU
 import math         # Funções matemáticas
 import numpy as np  # Biblioteca do Numpy
+from itertools import batched, pairwise
+
+
 
 class GL:
     """Classe que representa a biblioteca gráfica (Graphics Library)."""
@@ -32,6 +35,42 @@ class GL:
         GL.near = near
         GL.far = far
 
+
+    @staticmethod
+    def draw2D(point, color):
+        x, y = int(point[0]), int(point[1])
+        if not (0 <= x < GL.width and 0 <= y < GL.height):
+            return
+        rgb = [int(i * 255) for i in color["emissiveColor"]]
+        gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, rgb)
+
+    def bresenham(p0, p1):
+        x0, y0 = round(p0[0]), round(p0[1])
+        x1, y1 = round(p1[0]), round(p1[1])
+        dx, dy = abs(x1 - x0), -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        while True:
+            yield x0, y0
+            if x0 == x1 and y0 == y1:
+                return
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x0 += sx
+            if e2 <= dx:
+                err += dx
+                y0 += sy
+
+    
+    @staticmethod
+    def inside(a, b, c, x, y):
+        def edge(p, q):
+            return (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0])
+        w = (edge(a, b), edge(b, c), edge(c, a))
+        return all(v > 0 for v in w) or all(v < 0 for v in w)
+
     @staticmethod
     def polypoint2D(point, colors):
         """Função usada para renderizar Polypoint2D."""
@@ -44,15 +83,8 @@ class GL:
         # O parâmetro colors é um dicionário com os tipos cores possíveis, para o Polypoint2D
         # você pode assumir inicialmente o desenho dos pontos com a cor emissiva (emissiveColor).
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Polypoint2D : pontos = {0}".format(point)) # imprime no terminal pontos
-        print("Polypoint2D : colors = {0}".format(colors)) # imprime no terminal as cores
-
-        # Exemplo:
-        pos_x = GL.width//2
-        pos_y = GL.height//2
-        gpu.GPU.draw_pixel([pos_x, pos_y], gpu.GPU.RGB8, [255, 0, 0])  # altera pixel (u, v, tipo, r, g, b)
-        # cuidado com as cores, o X3D especifica de (0,1) e o Framebuffer de (0,255)
+        for x, y in batched(point, 2):
+            GL.draw2D((x, y), colors)
         
     @staticmethod
     def polyline2D(lineSegments, colors):
@@ -68,14 +100,9 @@ class GL:
         # O parâmetro colors é um dicionário com os tipos cores possíveis, para o Polyline2D
         # você pode assumir inicialmente o desenho das linhas com a cor emissiva (emissiveColor).
 
-        print("Polyline2D : lineSegments = {0}".format(lineSegments)) # imprime no terminal
-        print("Polyline2D : colors = {0}".format(colors)) # imprime no terminal as cores
-        
-        # Exemplo:
-        pos_x = GL.width//2
-        pos_y = GL.height//2
-        gpu.GPU.draw_pixel([pos_x, pos_y], gpu.GPU.RGB8, [255, 0, 255])  # altera pixel (u, v, tipo, r, g, b)
-        # cuidado com as cores, o X3D especifica de (0,1) e o Framebuffer de (0,255)
+        for p0, p1 in pairwise(batched(lineSegments, 2)):
+            for pixel in GL.bresenham(p0, p1):
+                GL.draw2D(pixel, colors)        
 
     @staticmethod
     def circle2D(radius, colors):
@@ -107,11 +134,20 @@ class GL:
         # quantidade de pontos é sempre multiplo de 3, ou seja, 6 valores ou 12 valores, etc.
         # O parâmetro colors é um dicionário com os tipos cores possíveis, para o TriangleSet2D
         # você pode assumir inicialmente o desenho das linhas com a cor emissiva (emissiveColor).
-        print("TriangleSet2D : vertices = {0}".format(vertices)) # imprime no terminal
-        print("TriangleSet2D : colors = {0}".format(colors)) # imprime no terminal as cores
+        
+        for tri in batched(vertices, 6):
+            a, b, c = batched(tri, 2)
 
-        # Exemplo:
-        gpu.GPU.draw_pixel([6, 8], gpu.GPU.RGB8, [255, 255, 0])  # altera pixel (u, v, tipo, r, g, b)
+            # contorno
+            for p, q in ((a, b), (b, c), (c, a)):
+                for pixel in GL.bresenham(p, q):
+                    GL.draw2D(pixel, colors)
+
+            # preenchimento
+            for y in range(GL.height):
+                for x in range(GL.width):
+                    if GL.inside(a, b, c, x + 0.5, y + 0.5):
+                        GL.draw2D((x, y), colors)
 
 
     @staticmethod
