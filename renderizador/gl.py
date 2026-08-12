@@ -68,8 +68,9 @@ class GL:
     def inside(a, b, c, x, y):
         def edge(p, q):
             return (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0])
+
         w = (edge(a, b), edge(b, c), edge(c, a))
-        return all(v > 0 for v in w) or all(v < 0 for v in w)
+        return all(v >= 0 for v in w) or all(v <= 0 for v in w)
 
     @staticmethod
     def polypoint2D(point, colors):
@@ -137,13 +138,6 @@ class GL:
         
         for tri in batched(vertices, 6):
             a, b, c = batched(tri, 2)
-
-            # contorno
-            for p, q in ((a, b), (b, c), (c, a)):
-                for pixel in GL.bresenham(p, q):
-                    GL.draw2D(pixel, colors)
-
-            # preenchimento
             for y in range(GL.height):
                 for x in range(GL.width):
                     if GL.inside(a, b, c, x + 0.5, y + 0.5):
