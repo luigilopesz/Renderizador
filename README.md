@@ -1,3 +1,5 @@
+# Luigi Carmona & Isabela Rodrigues
+
 # Renderizador
 Renderizador base para o curso de Computação Gráfica
 
