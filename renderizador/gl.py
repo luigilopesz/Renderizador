@@ -18,7 +18,6 @@ import numpy as np  # Biblioteca do Numpy
 from itertools import batched, pairwise
 
 
-
 class GL:
     """Classe que representa a biblioteca gráfica (Graphics Library)."""
 
@@ -27,6 +26,10 @@ class GL:
     near = 0.01   # plano de corte próximo
     far = 1000    # plano de corte distante
 
+    view_matrix = np.identity(4)         # matriz da câmera (mundo -> câmera)
+    perspective_matrix = np.identity(4)  # matriz de projeção perspectiva
+    transform_stack = [np.identity(4)]   # pilha de matrizes de transformação (mundo)
+
     @staticmethod
     def setup(width, height, near=0.01, far=1000):
         """Definr parametros para câmera de razão de aspecto, plano próximo e distante."""
@@ -34,6 +37,38 @@ class GL:
         GL.height = height
         GL.near = near
         GL.far = far
+
+    @staticmethod
+    def rotation_matrix(axis, angle):
+        """Cria uma matriz de rotação 4x4 (homogênea) a partir de eixo/ângulo."""
+        x, y, z = axis
+        norm = math.sqrt(x * x + y * y + z * z)
+        if norm == 0:
+            return np.identity(4)
+        x, y, z = x / norm, y / norm, z / norm
+        c = math.cos(angle)
+        s = math.sin(angle)
+        t = 1 - c
+        return np.array([
+            [t*x*x + c,   t*x*y - s*z, t*x*z + s*y, 0],
+            [t*x*y + s*z, t*y*y + c,   t*y*z - s*x, 0],
+            [t*x*z - s*y, t*y*z + s*x, t*z*z + c,   0],
+            [0,           0,           0,           1],
+        ])
+
+    @staticmethod
+    def translation_matrix(translation):
+        """Cria uma matriz de translação 4x4 (homogênea)."""
+        matrix = np.identity(4)
+        matrix[:3, 3] = translation
+        return matrix
+
+    @staticmethod
+    def scale_matrix(scale):
+        """Cria uma matriz de escala 4x4 (homogênea)."""
+        matrix = np.identity(4)
+        matrix[0, 0], matrix[1, 1], matrix[2, 2] = scale
+        return matrix
 
 
     @staticmethod
@@ -161,12 +196,29 @@ class GL:
         # (emissiveColor), conforme implementar novos materias você deverá suportar outros
         # tipos de cores.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TriangleSet : pontos = {0}".format(point)) # imprime no terminal pontos
-        print("TriangleSet : colors = {0}".format(colors)) # imprime no terminal as cores
+        # Matriz completa que leva pontos do espaço do objeto para o espaço de recorte
+        # (clip space): modelo (pilha de transform) -> câmera (view) -> projeção
+        mvp_matrix = GL.perspective_matrix @ GL.view_matrix @ GL.transform_stack[-1]
 
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        for tri in batched(point, 9):
+            screen_points = []
+            for x, y, z in batched(tri, 3):
+                clip = mvp_matrix @ np.array([x, y, z, 1.0])
+                ndc = clip[:3] / clip[3]
+                screen_x = (ndc[0] + 1) / 2 * GL.width
+                screen_y = (1 - ndc[1]) / 2 * GL.height
+                screen_points.append((screen_x, screen_y))
+
+            a, b, c = screen_points
+            min_x = max(int(min(a[0], b[0], c[0])), 0)
+            max_x = min(int(max(a[0], b[0], c[0])) + 1, GL.width)
+            min_y = max(int(min(a[1], b[1], c[1])), 0)
+            max_y = min(int(max(a[1], b[1], c[1])) + 1, GL.height)
+
+            for y in range(min_y, max_y):
+                for x in range(min_x, max_x):
+                    if GL.inside(a, b, c, x + 0.5, y + 0.5):
+                        GL.draw2D((x, y), colors)
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
@@ -175,11 +227,30 @@ class GL:
         # câmera virtual. Use esses dados para poder calcular e criar a matriz de projeção
         # perspectiva para poder aplicar nos pontos dos objetos geométricos.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Viewpoint : ", end='')
-        print("position = {0} ".format(position), end='')
-        print("orientation = {0} ".format(orientation), end='')
-        print("fieldOfView = {0} ".format(fieldOfView))
+        # Matriz da câmera no mundo (posição e orientação) e sua inversa (view matrix),
+        # que leva pontos do sistema de coordenadas do mundo para o da câmera
+        rotation = GL.rotation_matrix(orientation[:3], orientation[3])
+        translation = GL.translation_matrix(position)
+        camera_matrix = translation @ rotation
+        GL.view_matrix = np.linalg.inv(camera_matrix)
+
+        # O fieldOfView se aplica à menor dimensão da tela, a outra é derivada pela
+        # razão de aspecto para não distorcer a imagem.
+        aspect_ratio = GL.width / GL.height
+        fovy = fieldOfView
+        if aspect_ratio < 1:
+            fovy = 2 * math.atan(math.tan(fieldOfView / 2) / aspect_ratio)
+
+        top = GL.near * math.tan(fovy / 2)
+        right = top * aspect_ratio
+        near, far = GL.near, GL.far
+
+        GL.perspective_matrix = np.array([
+            [near / right, 0, 0, 0],
+            [0, near / top, 0, 0],
+            [0, 0, -(far + near) / (far - near), -2 * far * near / (far - near)],
+            [0, 0, -1, 0],
+        ])
 
     @staticmethod
     def transform_in(translation, scale, rotation):
@@ -189,21 +260,19 @@ class GL:
         # indicando a escala em cada direção, a translação [x, y, z] nas respectivas
         # coordenadas e finalmente a rotação por [x, y, z, t] sendo definida pela rotação
         # do objeto ao redor do eixo x, y, z por t radianos, seguindo a regra da mão direita.
-        # ESSES NÃO SÃO OS VALORES DE QUATÉRNIOS AS CONTAS AINDA PRECISAM SER FEITAS.
         # Quando se entrar em um nó transform se deverá salvar a matriz de transformação dos
-        # modelos do mundo para depois potencialmente usar em outras chamadas. 
+        # modelos do mundo para depois potencialmente usar em outras chamadas.
         # Quando começar a usar Transforms dentre de outros Transforms, mais a frente no curso
         # Você precisará usar alguma estrutura de dados pilha para organizar as matrizes.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Transform : ", end='')
-        if translation:
-            print("translation = {0} ".format(translation), end='') # imprime no terminal
-        if scale:
-            print("scale = {0} ".format(scale), end='') # imprime no terminal
-        if rotation:
-            print("rotation = {0} ".format(rotation), end='') # imprime no terminal
-        print("")
+        # A ordem de aplicação em um ponto local é escala, depois rotação, depois translação
+        t_matrix = GL.translation_matrix(translation)
+        r_matrix = GL.rotation_matrix(rotation[:3], rotation[3])
+        s_matrix = GL.scale_matrix(scale)
+        local_matrix = t_matrix @ r_matrix @ s_matrix
+
+        parent_matrix = GL.transform_stack[-1]
+        GL.transform_stack.append(parent_matrix @ local_matrix)
 
     @staticmethod
     def transform_out():
@@ -212,9 +281,7 @@ class GL:
         # grafo de cena. Não são passados valores, porém quando se sai de um nó transform se
         # deverá recuperar a matriz de transformação dos modelos do mundo da estrutura de
         # pilha implementada.
-
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Saindo de Transform")
+        GL.transform_stack.pop()
 
     @staticmethod
     def triangleStripSet(point, stripCount, colors):
