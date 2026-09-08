@@ -180,45 +180,111 @@ class GL:
 
 
     @staticmethod
+    def mvp_matrix():
+        """Matriz completa que leva pontos do espaço do objeto para o espaço de tela:
+        modelo (pilha de transform) -> câmera (view) -> projeção."""
+        return GL.perspective_matrix @ GL.view_matrix @ GL.transform_stack[-1]
+
+    @staticmethod
+    def project(vertex, mvp):
+        """Projeta um ponto 3D do espaço do objeto para coordenadas de tela (x, y)."""
+        x, y, z = vertex
+        clip = mvp @ np.array([x, y, z, 1.0])
+        ndc = clip[:3] / clip[3]
+        screen_x = (ndc[0] + 1) / 2 * GL.width
+        screen_y = (1 - ndc[1]) / 2 * GL.height
+        return screen_x, screen_y
+
+    @staticmethod
+    def fill_triangle(a, b, c, colors, vertex_colors=None, uvs=None, texture=None):
+        """Percorre a bounding box de um triângulo em tela e pinta os pixels internos.
+
+        Por padrão pinta tudo com colors["emissiveColor"] (cor plana). Se vertex_colors
+        (3 cores RGB, uma por vértice) ou uvs (3 pares uv) + texture forem passados, a cor
+        de cada pixel é interpolada por coordenadas baricêntricas.
+        """
+        min_x = max(int(min(a[0], b[0], c[0])), 0)
+        max_x = min(int(max(a[0], b[0], c[0])) + 1, GL.width)
+        min_y = max(int(min(a[1], b[1], c[1])), 0)
+        max_y = min(int(max(a[1], b[1], c[1])) + 1, GL.height)
+
+        def edge(p, q, x, y):
+            return (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0])
+
+        area = edge(a, b, c[0], c[1])
+        if area == 0:
+            return
+
+        for y in range(min_y, max_y):
+            for x in range(min_x, max_x):
+                px, py = x + 0.5, y + 0.5
+                if not GL.inside(a, b, c, px, py):
+                    continue
+                if vertex_colors is None and uvs is None:
+                    GL.draw2D((x, y), colors)
+                    continue
+
+                # Pesos baricêntricos reaproveitando as mesmas funções de aresta do inside()
+                wa = edge(b, c, px, py) / area
+                wb = edge(c, a, px, py) / area
+                wc = 1 - wa - wb
+
+                if vertex_colors is not None:
+                    rgb = [wa * vertex_colors[0][i] + wb * vertex_colors[1][i] + wc * vertex_colors[2][i]
+                           for i in range(3)]
+                else:
+                    u = wa * uvs[0][0] + wb * uvs[1][0] + wc * uvs[2][0]
+                    v = wa * uvs[0][1] + wb * uvs[1][1] + wc * uvs[2][1]
+                    th, tw = texture.shape[0], texture.shape[1]
+                    # ponytail: amostragem "nearest" sem filtragem; nenhum exemplo desta
+                    # etapa usa textura, então a convenção de eixo u/v não foi validada
+                    # visualmente. Ajustar se um exemplo com ImageTexture falhar.
+                    tx = min(max(int(u * tw), 0), tw - 1)
+                    ty = min(max(int((1 - v) * th), 0), th - 1)
+                    rgb = [channel / 255 for channel in texture[ty, tx][:3]]
+
+                GL.draw2D((x, y), {**colors, "emissiveColor": rgb})
+
+    @staticmethod
+    def split_strips(indices):
+        """Separa uma lista de índices em tiras, quebrando a cada -1."""
+        strips = []
+        current = []
+        for i in indices:
+            if i == -1:
+                if current:
+                    strips.append(current)
+                current = []
+            else:
+                current.append(i)
+        if current:
+            strips.append(current)
+        return strips
+
+    @staticmethod
+    def draw_strip(screen_points, colors, vertex_colors=None):
+        """Desenha uma tira de triângulos já projetada em tela (índices 0, 1, 2, depois
+        1, 2, 3, etc.), alternando a ordem dos vértices para manter a orientação."""
+        for i in range(len(screen_points) - 2):
+            tri = (0, 1, 2) if i % 2 == 0 else (1, 0, 2)
+            a, b, c = (screen_points[i + tri[0]], screen_points[i + tri[1]], screen_points[i + tri[2]])
+            vc = None
+            if vertex_colors is not None:
+                vc = (vertex_colors[i + tri[0]], vertex_colors[i + tri[1]], vertex_colors[i + tri[2]])
+            GL.fill_triangle(a, b, c, colors, vertex_colors=vc)
+
+    @staticmethod
     def triangleSet(point, colors):
         """Função usada para renderizar TriangleSet."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleSet
-        # Nessa função você receberá pontos no parâmetro point, esses pontos são uma lista
-        # de pontos x, y, e z sempre na ordem. Assim point[0] é o valor da coordenada x do
-        # primeiro ponto, point[1] o valor y do primeiro ponto, point[2] o valor z da
-        # coordenada z do primeiro ponto. Já point[3] é a coordenada x do segundo ponto e
-        # assim por diante.
         # No TriangleSet os triângulos são informados individualmente, assim os três
         # primeiros pontos definem um triângulo, os três próximos pontos definem um novo
         # triângulo, e assim por diante.
-        # O parâmetro colors é um dicionário com os tipos cores possíveis, você pode assumir
-        # inicialmente, para o TriangleSet, o desenho das linhas com a cor emissiva
-        # (emissiveColor), conforme implementar novos materias você deverá suportar outros
-        # tipos de cores.
 
-        # Matriz completa que leva pontos do espaço do objeto para o espaço de recorte
-        # (clip space): modelo (pilha de transform) -> câmera (view) -> projeção
-        mvp_matrix = GL.perspective_matrix @ GL.view_matrix @ GL.transform_stack[-1]
-
+        mvp = GL.mvp_matrix()
         for tri in batched(point, 9):
-            screen_points = []
-            for x, y, z in batched(tri, 3):
-                clip = mvp_matrix @ np.array([x, y, z, 1.0])
-                ndc = clip[:3] / clip[3]
-                screen_x = (ndc[0] + 1) / 2 * GL.width
-                screen_y = (1 - ndc[1]) / 2 * GL.height
-                screen_points.append((screen_x, screen_y))
-
-            a, b, c = screen_points
-            min_x = max(int(min(a[0], b[0], c[0])), 0)
-            max_x = min(int(max(a[0], b[0], c[0])) + 1, GL.width)
-            min_y = max(int(min(a[1], b[1], c[1])), 0)
-            max_y = min(int(max(a[1], b[1], c[1])) + 1, GL.height)
-
-            for y in range(min_y, max_y):
-                for x in range(min_x, max_x):
-                    if GL.inside(a, b, c, x + 0.5, y + 0.5):
-                        GL.draw2D((x, y), colors)
+            a, b, c = (GL.project(p, mvp) for p in batched(tri, 3))
+            GL.fill_triangle(a, b, c, colors)
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
@@ -287,92 +353,85 @@ class GL:
     def triangleStripSet(point, stripCount, colors):
         """Função usada para renderizar TriangleStripSet."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleStripSet
-        # A função triangleStripSet é usada para desenhar tiras de triângulos interconectados,
-        # você receberá as coordenadas dos pontos no parâmetro point, esses pontos são uma
-        # lista de pontos x, y, e z sempre na ordem. Assim point[0] é o valor da coordenada x
-        # do primeiro ponto, point[1] o valor y do primeiro ponto, point[2] o valor z da
-        # coordenada z do primeiro ponto. Já point[3] é a coordenada x do segundo ponto e assim
-        # por diante. No TriangleStripSet a quantidade de vértices a serem usados é informado
-        # em uma lista chamada stripCount (perceba que é uma lista). Ligue os vértices na ordem,
-        # primeiro triângulo será com os vértices 0, 1 e 2, depois serão os vértices 1, 2 e 3,
-        # depois 2, 3 e 4, e assim por diante. Cuidado com a orientação dos vértices, ou seja,
-        # todos no sentido horário ou todos no sentido anti-horário, conforme especificado.
+        # No TriangleStripSet a quantidade de vértices de cada tira é informada em stripCount
+        # (uma lista, pois pode haver várias tiras). Ligue os vértices na ordem, primeiro
+        # triângulo com os vértices 0, 1 e 2, depois 1, 2 e 3, depois 2, 3 e 4, e assim por
+        # diante, alternando a orientação para manter a face sempre no mesmo sentido.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TriangleStripSet : pontos = {0} ".format(point), end='')
-        for i, strip in enumerate(stripCount):
-            print("strip[{0}] = {1} ".format(i, strip), end='')
-        print("")
-        print("TriangleStripSet : colors = {0}".format(colors)) # imprime no terminal as cores
-
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        mvp = GL.mvp_matrix()
+        points = list(batched(point, 3))
+        offset = 0
+        for count in stripCount:
+            strip = points[offset:offset + count]
+            offset += count
+            screen = [GL.project(p, mvp) for p in strip]
+            GL.draw_strip(screen, colors)
 
     @staticmethod
     def indexedTriangleStripSet(point, index, colors):
         """Função usada para renderizar IndexedTriangleStripSet."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#IndexedTriangleStripSet
-        # A função indexedTriangleStripSet é usada para desenhar tiras de triângulos
-        # interconectados, você receberá as coordenadas dos pontos no parâmetro point, esses
-        # pontos são uma lista de pontos x, y, e z sempre na ordem. Assim point[0] é o valor
-        # da coordenada x do primeiro ponto, point[1] o valor y do primeiro ponto, point[2]
-        # o valor z da coordenada z do primeiro ponto. Já point[3] é a coordenada x do
-        # segundo ponto e assim por diante. No IndexedTriangleStripSet uma lista informando
-        # como conectar os vértices é informada em index, o valor -1 indica que a lista
-        # acabou. A ordem de conexão será de 3 em 3 pulando um índice. Por exemplo: o
-        # primeiro triângulo será com os vértices 0, 1 e 2, depois serão os vértices 1, 2 e 3,
-        # depois 2, 3 e 4, e assim por diante. Cuidado com a orientação dos vértices, ou seja,
-        # todos no sentido horário ou todos no sentido anti-horário, conforme especificado.
+        # No IndexedTriangleStripSet uma lista informando como conectar os vértices é
+        # informada em index; o valor -1 separa uma tira da outra. Dentro de cada tira, os
+        # triângulos são formados 0-1-2, 1-2-3, 2-3-4, etc., alternando a orientação.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("IndexedTriangleStripSet : pontos = {0}, index = {1}".format(point, index))
-        print("IndexedTriangleStripSet : colors = {0}".format(colors)) # imprime as cores
-
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        mvp = GL.mvp_matrix()
+        points = list(batched(point, 3))
+        for strip in GL.split_strips(index):
+            screen = [GL.project(points[i], mvp) for i in strip]
+            GL.draw_strip(screen, colors)
 
     @staticmethod
     def indexedFaceSet(coord, coordIndex, colorPerVertex, color, colorIndex,
                        texCoord, texCoordIndex, colors, current_texture):
         """Função usada para renderizar IndexedFaceSet."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#IndexedFaceSet
-        # A função indexedFaceSet é usada para desenhar malhas de triângulos. Ela funciona de
-        # forma muito simular a IndexedTriangleStripSet porém com mais recursos.
-        # Você receberá as coordenadas dos pontos no parâmetro cord, esses
-        # pontos são uma lista de pontos x, y, e z sempre na ordem. Assim coord[0] é o valor
-        # da coordenada x do primeiro ponto, coord[1] o valor y do primeiro ponto, coord[2]
-        # o valor z da coordenada z do primeiro ponto. Já coord[3] é a coordenada x do
-        # segundo ponto e assim por diante. No IndexedFaceSet uma lista de vértices é informada
-        # em coordIndex, o valor -1 indica que a lista acabou.
-        # A ordem de conexão não possui uma ordem oficial, mas em geral se o primeiro ponto com os dois
-        # seguintes e depois este mesmo primeiro ponto com o terçeiro e quarto ponto. Por exemplo: numa
-        # sequencia 0, 1, 2, 3, 4, -1 o primeiro triângulo será com os vértices 0, 1 e 2, depois serão
-        # os vértices 0, 2 e 3, e depois 0, 3 e 4, e assim por diante, até chegar no final da lista.
-        # Adicionalmente essa implementação do IndexedFace aceita cores por vértices, assim
-        # se a flag colorPerVertex estiver habilitada, os vértices também possuirão cores
-        # que servem para definir a cor interna dos poligonos, para isso faça um cálculo
-        # baricêntrico de que cor deverá ter aquela posição. Da mesma forma se pode definir uma
-        # textura para o poligono, para isso, use as coordenadas de textura e depois aplique a
-        # cor da textura conforme a posição do mapeamento. Dentro da classe GPU já está
-        # implementadado um método para a leitura de imagens.
+        # coordIndex lista os vértices de cada face, separadas por -1. Cada face é
+        # triangulada em leque a partir do primeiro vértice: 0-1-2, 0-2-3, 0-3-4, etc.
+        # Se colorPerVertex e color/colorIndex forem dados, a cor é interpolada por
+        # baricêntricas; senão cada face usa uma única cor (colorIndex) ou a cor do material.
+        # Se texCoord/texCoordIndex e uma textura forem dados, a cor vem da textura.
 
-        # Os prints abaixo são só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("IndexedFaceSet : ")
-        if coord:
-            print("\tpontos(x, y, z) = {0}, coordIndex = {1}".format(coord, coordIndex))
-        print("colorPerVertex = {0}".format(colorPerVertex))
-        if colorPerVertex and color and colorIndex:
-            print("\tcores(r, g, b) = {0}, colorIndex = {1}".format(color, colorIndex))
-        if texCoord and texCoordIndex:
-            print("\tpontos(u, v) = {0}, texCoordIndex = {1}".format(texCoord, texCoordIndex))
-        if current_texture:
-            image = gpu.GPU.load_texture(current_texture[0])
-            print("\t Matriz com image = {0}".format(image))
-            print("\t Dimensões da image = {0}".format(image.shape))
-        print("IndexedFaceSet : colors = {0}".format(colors))  # imprime no terminal as cores
+        if not coord:
+            return
 
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        mvp = GL.mvp_matrix()
+        points = list(batched(coord, 3))
+        faces = GL.split_strips(coordIndex)
+
+        colors_list = list(batched(color, 3)) if color else None
+        color_faces = GL.split_strips(colorIndex) if colorIndex else faces
+
+        uv_list = list(batched(texCoord, 2)) if texCoord else None
+        uv_faces = GL.split_strips(texCoordIndex) if texCoordIndex else faces
+
+        texture = None
+        if current_texture and uv_list:
+            texture = gpu.GPU.load_texture(current_texture[0])
+
+        for face_i, face in enumerate(faces):
+            screen = [GL.project(points[i], mvp) for i in face]
+
+            face_colors = colors
+            vertex_colors = None
+            if texture is not None and face_i < len(uv_faces):
+                uvs_face = [uv_list[i] for i in uv_faces[face_i]]
+            else:
+                uvs_face = None
+
+            if colorPerVertex and colors_list and face_i < len(color_faces):
+                vertex_colors = [colors_list[i] for i in color_faces[face_i]]
+            elif colors_list and face_i < len(color_faces) and color_faces[face_i]:
+                flat_rgb = colors_list[color_faces[face_i][0]]
+                face_colors = {**colors, "emissiveColor": flat_rgb}
+
+            for i in range(1, len(screen) - 1):
+                tri = (0, i, i + 1)
+                a, b, c = screen[tri[0]], screen[tri[1]], screen[tri[2]]
+                vc = [vertex_colors[t] for t in tri] if vertex_colors else None
+                uvs = [uvs_face[t] for t in tri] if uvs_face else None
+                GL.fill_triangle(a, b, c, face_colors, vertex_colors=vc, uvs=uvs,
+                                  texture=texture if uvs else None)
 
     @staticmethod
     def box(size, colors):
