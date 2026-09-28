@@ -31,6 +31,7 @@ class Renderizador:
         """Definindo valores padrão."""
         self.width = LARGURA
         self.height = ALTURA
+        self.ssaa = 2  # fator de supersampling (anti-aliasing), ligado por padrão
         self.x3d_file = ""
         self.image_file = "tela.png"
         self.scene = None
@@ -40,22 +41,33 @@ class Renderizador:
         """Configura o sistema para a renderização."""
         # Configurando color buffers para exibição na tela
 
-        # Cria uma (1) posição de FrameBuffer na GPU
-        fbo = gpu.GPU.gen_framebuffers(1)
+        # Cria duas posições de FrameBuffer na GPU:
+        # - SS: onde a GL de fato desenha, numa resolução "ssaa" vezes maior (para o
+        #   anti-aliasing por supersampling) e com canal de profundidade (z-buffer).
+        # - FRONT: buffer na resolução final, só de cor, onde vai parar a imagem já
+        #   com o downsampling feito (é o que é exibido/salvo).
+        fbo = gpu.GPU.gen_framebuffers(2)
+        self.framebuffers["SS"] = fbo[0]
+        self.framebuffers["FRONT"] = fbo[1]
 
-        # Define o atributo FRONT como o FrameBuffe principal
-        self.framebuffers["FRONT"] = fbo[0]
+        largura_ss = self.width * self.ssaa
+        altura_ss = self.height * self.ssaa
 
-        # Define que a posição criada será usada para desenho e leitura
-        gpu.GPU.bind_framebuffer(gpu.GPU.FRAMEBUFFER, self.framebuffers["FRONT"])
-        # Opções:
-        # - DRAW_FRAMEBUFFER: Faz o bind só para escrever no framebuffer
-        # - READ_FRAMEBUFFER: Faz o bind só para leitura no framebuffer
-        # - FRAMEBUFFER: Faz o bind para leitura e escrita no framebuffer
+        gpu.GPU.framebuffer_storage(
+            self.framebuffers["SS"],
+            gpu.GPU.COLOR_ATTACHMENT,
+            gpu.GPU.RGB8,
+            largura_ss,
+            altura_ss
+        )
+        gpu.GPU.framebuffer_storage(
+            self.framebuffers["SS"],
+            gpu.GPU.DEPTH_ATTACHMENT,
+            gpu.GPU.DEPTH_COMPONENT32F,
+            largura_ss,
+            altura_ss
+        )
 
-        # Aloca memória no FrameBuffer para um tipo e tamanho especificado de buffer
-
-        # Memória de Framebuffer para canal de cores
         gpu.GPU.framebuffer_storage(
             self.framebuffers["FRONT"],
             gpu.GPU.COLOR_ATTACHMENT,
@@ -64,19 +76,9 @@ class Renderizador:
             self.height
         )
 
-        # Descomente as seguintes linhas se for usar um Framebuffer para profundidade
-        # gpu.GPU.framebuffer_storage(
-        #     self.framebuffers["FRONT"],
-        #     gpu.GPU.DEPTH_ATTACHMENT,
-        #     gpu.GPU.DEPTH_COMPONENT32F,
-        #     self.width,
-        #     self.height
-        # )
-    
         # Opções:
         # - COLOR_ATTACHMENT: alocações para as cores da imagem renderizada
         # - DEPTH_ATTACHMENT: alocações para as profundidades da imagem renderizada
-        # Obs: Você pode chamar duas vezes a rotina com cada tipo de buffer.
 
         # Tipos de dados:
         # - RGB8: Para canais de cores (Vermelho, Verde, Azul) 8bits cada (0-255)
@@ -91,12 +93,15 @@ class Renderizador:
         # Assuma 1.0 o mais afastado e -1.0 o mais próximo da camera
         gpu.GPU.clear_depth(1.0)
 
-        # Definindo tamanho do Viewport para renderização
-        self.scene.viewport(width=self.width, height=self.height)
+        # Definindo tamanho do Viewport para renderização (já na resolução supersampleada)
+        self.scene.viewport(width=largura_ss, height=altura_ss)
 
     def pre(self):
         """Rotinas pré renderização."""
         # Função invocada antes do processo de renderização iniciar.
+
+        # A GL sempre desenha (e faz o teste de profundidade) no buffer supersampleado
+        gpu.GPU.bind_framebuffer(gpu.GPU.FRAMEBUFFER, self.framebuffers["SS"])
 
         # Limpa o frame buffers atual
         gpu.GPU.clear_buffer()
@@ -112,6 +117,33 @@ class Renderizador:
         # Essa é uma chamada conveniente para manipulação de buffers
         # ao final da renderização de um frame. Como por exemplo, executar
         # downscaling da imagem.
+
+        # Faz o downsampling: lê blocos ssaa x ssaa do buffer supersampleado (SS) e
+        # escreve a média de cada bloco como um pixel no buffer final (FRONT).
+        gpu.GPU.bind_framebuffer(gpu.GPU.READ_FRAMEBUFFER, self.framebuffers["SS"])
+        gpu.GPU.bind_framebuffer(gpu.GPU.DRAW_FRAMEBUFFER, self.framebuffers["FRONT"])
+        gpu.GPU.clear_buffer()  # limpa o FRONT antes de escrever a imagem nova
+
+        amostras_por_pixel = self.ssaa * self.ssaa
+        for y in range(self.height):
+            for x in range(self.width):
+                soma_r, soma_g, soma_b = 0, 0, 0
+                for dy in range(self.ssaa):
+                    for dx in range(self.ssaa):
+                        r, g, b = gpu.GPU.read_pixel(
+                            [x * self.ssaa + dx, y * self.ssaa + dy], gpu.GPU.RGB8)
+        
+                        # estoura (satura em 255) ao somar mais de um pixel não totalmente preto
+                        soma_r += int(r)
+                        soma_g += int(g)
+                        soma_b += int(b)
+                media = [soma_r // amostras_por_pixel,
+                         soma_g // amostras_por_pixel,
+                         soma_b // amostras_por_pixel]
+                gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, media)
+
+        # Deixa o FRONT (resolução final) como buffer de leitura para exibição/salvamento
+        gpu.GPU.bind_framebuffer(gpu.GPU.FRAMEBUFFER, self.framebuffers["FRONT"])
 
         # Método para a troca dos buffers (NÃO IMPLEMENTADO)
         # Esse método será utilizado na fase de implementação de animações
@@ -184,7 +216,8 @@ class Renderizador:
             self.width,
             self.height,
             near=0.01,
-            far=1000
+            far=1000,
+            ssaa=self.ssaa
         )
 
         # Funções que irão fazer o rendering

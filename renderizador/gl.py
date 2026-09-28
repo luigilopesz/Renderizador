@@ -6,7 +6,7 @@
 """
 Biblioteca Gráfica / Graphics Library.
 
-Desenvolvido por: <Luigi Carmona de Miranda Lopes>
+Desenvolvido por: <Luigi Carmona de Miranda Lopes & Isabela Vieira Rodrigues>
 Disciplina: Computação Gráfica
 Data: <12/08/2026>
 """
@@ -21,20 +21,26 @@ from itertools import batched, pairwise
 class GL:
     """Classe que representa a biblioteca gráfica (Graphics Library)."""
 
-    width = 800   # largura da tela
-    height = 600  # altura da tela
+    width = 800   # largura da tela (já multiplicada pelo fator de supersampling)
+    height = 600  # altura da tela (já multiplicada pelo fator de supersampling)
     near = 0.01   # plano de corte próximo
     far = 1000    # plano de corte distante
+    ssaa = 1      # fator de supersampling (SSAA) usado no anti-aliasing
 
     view_matrix = np.identity(4)         # matriz da câmera (mundo -> câmera)
     perspective_matrix = np.identity(4)  # matriz de projeção perspectiva
     transform_stack = [np.identity(4)]   # pilha de matrizes de transformação (mundo)
 
+#fazer 4 buffers
+
     @staticmethod
-    def setup(width, height, near=0.01, far=1000):
+    def setup(width, height, near=0.01, far=1000, ssaa=1):
         """Definr parametros para câmera de razão de aspecto, plano próximo e distante."""
-        GL.width = width
-        GL.height = height
+        # width/height são a resolução final; a GL desenha internamente ssaa vezes maior
+        # (quem chama faz o downsampling de volta, fora da GL).
+        GL.ssaa = ssaa
+        GL.width = width * ssaa
+        GL.height = height * ssaa
         GL.near = near
         GL.far = far
 
@@ -79,6 +85,15 @@ class GL:
         rgb = [int(i * 255) for i in color["emissiveColor"]]
         gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, rgb)
 
+    @staticmethod
+    def draw2D_bloco(x, y, color):
+        """Desenha o bloco ssaa x ssaa que representa 1 pixel final na tela supersampleada."""
+        # Traços de 1 pixel (bresenham/círculo) senão ficariam finos demais e diluídos
+        # no downsampling.
+        for dy in range(GL.ssaa):
+            for dx in range(GL.ssaa):
+                GL.draw2D((x * GL.ssaa + dx, y * GL.ssaa + dy), color)
+
     def bresenham(p0, p1):
         x0, y0 = round(p0[0]), round(p0[1])
         x1, y1 = round(p1[0]), round(p1[1])
@@ -120,8 +135,8 @@ class GL:
         # você pode assumir inicialmente o desenho dos pontos com a cor emissiva (emissiveColor).
 
         for x, y in batched(point, 2):
-            GL.draw2D((x, y), colors)
-        
+            GL.draw2D_bloco(int(x), int(y), colors)
+
     @staticmethod
     def polyline2D(lineSegments, colors):
         """Função usada para renderizar Polyline2D."""
@@ -137,8 +152,31 @@ class GL:
         # você pode assumir inicialmente o desenho das linhas com a cor emissiva (emissiveColor).
 
         for p0, p1 in pairwise(batched(lineSegments, 2)):
-            for pixel in GL.bresenham(p0, p1):
-                GL.draw2D(pixel, colors)        
+            for x, y in GL.bresenham(p0, p1):
+                GL.draw2D_bloco(x, y, colors)
+
+    def circulo_pontos(centro_x, centro_y, raio):
+        """Gera os pontos do contorno de um círculo (algoritmo do ponto médio)."""
+        x = raio
+        y = 0
+        decisao = 1 - raio
+
+        while x >= y:
+            yield centro_x + x, centro_y + y
+            yield centro_x + y, centro_y + x
+            yield centro_x - y, centro_y + x
+            yield centro_x - x, centro_y + y
+            yield centro_x - x, centro_y - y
+            yield centro_x - y, centro_y - x
+            yield centro_x + y, centro_y - x
+            yield centro_x + x, centro_y - y
+
+            y += 1
+            if decisao <= 0:
+                decisao += 2 * y + 1
+            else:
+                x -= 1
+                decisao += 2 * (y - x) + 1
 
     @staticmethod
     def circle2D(radius, colors):
@@ -149,14 +187,11 @@ class GL:
         # O parâmetro colors é um dicionário com os tipos cores possíveis, para o Circle2D
         # você pode assumir o desenho das linhas com a cor emissiva (emissiveColor).
 
-        print("Circle2D : radius = {0}".format(radius)) # imprime no terminal
-        print("Circle2D : colors = {0}".format(colors)) # imprime no terminal as cores
-        
-        # Exemplo:
-        pos_x = GL.width//2
-        pos_y = GL.height//2
-        gpu.GPU.draw_pixel([pos_x, pos_y], gpu.GPU.RGB8, [255, 0, 255])  # altera pixel (u, v, tipo, r, g, b)
-        # cuidado com as cores, o X3D especifica de (0,1) e o Framebuffer de (0,255)
+        centro_x = (GL.width // GL.ssaa) // 2
+        centro_y = (GL.height // GL.ssaa) // 2
+
+        for x, y in GL.circulo_pontos(centro_x, centro_y, round(radius)):
+            GL.draw2D_bloco(x, y, colors)
 
 
     @staticmethod
@@ -172,9 +207,15 @@ class GL:
         # você pode assumir inicialmente o desenho das linhas com a cor emissiva (emissiveColor).
         
         for tri in batched(vertices, 6):
-            a, b, c = batched(tri, 2)
-            for y in range(GL.height):
-                for x in range(GL.width):
+            a, b, c = ((x * GL.ssaa, y * GL.ssaa) for x, y in batched(tri, 2))
+
+            min_x = max(int(min(a[0], b[0], c[0])), 0)
+            max_x = min(int(max(a[0], b[0], c[0])) + 1, GL.width)
+            min_y = max(int(min(a[1], b[1], c[1])), 0)
+            max_y = min(int(max(a[1], b[1], c[1])) + 1, GL.height)
+
+            for y in range(min_y, max_y):
+                for x in range(min_x, max_x):
                     if GL.inside(a, b, c, x + 0.5, y + 0.5):
                         GL.draw2D((x, y), colors)
 
@@ -187,21 +228,43 @@ class GL:
 
     @staticmethod
     def project(vertex, mvp):
-        """Projeta um ponto 3D do espaço do objeto para coordenadas de tela (x, y)."""
+        """Projeta um ponto 3D para a tela; retorna (x, y, profundidade, w)."""
+        # profundidade: Z normalizado [0,1] (vai pro z-buffer). w: W do clip space
+        # (= -Z da câmera), usado depois pra interpolação com correção de perspectiva.
         x, y, z = vertex
         clip = mvp @ np.array([x, y, z, 1.0])
-        ndc = clip[:3] / clip[3]
+        w = clip[3]
+        ndc = clip[:3] / w
         screen_x = (ndc[0] + 1) / 2 * GL.width
         screen_y = (1 - ndc[1]) / 2 * GL.height
-        return screen_x, screen_y
+        profundidade = (ndc[2] + 1) / 2
+        return screen_x, screen_y, profundidade, w
+
+    @staticmethod
+    def visivel_no_z_buffer(x, y, profundidade):
+        """Testa e atualiza o z-buffer; True se o pixel deve ser desenhado."""
+        profundidade_atual = gpu.GPU.read_pixel([x, y], gpu.GPU.DEPTH_COMPONENT32F)[0]
+        if profundidade >= profundidade_atual:
+            return False
+        gpu.GPU.draw_pixel([x, y], gpu.GPU.DEPTH_COMPONENT32F, [float(profundidade)])
+        return True
+
+    @staticmethod
+    def escreve_pixel_com_transparencia(x, y, rgb, transparencia):
+        """Escreve o pixel, misturando com a cor já no framebuffer (0=opaco, 1=transparente)."""
+        if transparencia > 0:
+            cor_anterior = gpu.GPU.read_pixel([x, y], gpu.GPU.RGB8)
+            rgb = [cor_anterior[i] / 255 * transparencia + rgb[i] * (1 - transparencia)
+                   for i in range(3)]
+        rgb_255 = [int(max(0, min(1, canal)) * 255) for canal in rgb]
+        gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, rgb_255)
 
     @staticmethod
     def fill_triangle(a, b, c, colors, vertex_colors=None, uvs=None, texture=None):
-        """Percorre a bounding box de um triângulo em tela e pinta os pixels internos.
+        """Preenche um triângulo (a, b, c = tuplas (x, y, profundidade, w) de GL.project()).
 
-        Por padrão pinta tudo com colors["emissiveColor"] (cor plana). Se vertex_colors
-        (3 cores RGB, uma por vértice) ou uvs (3 pares uv) + texture forem passados, a cor
-        de cada pixel é interpolada por coordenadas baricêntricas.
+        Cor plana por padrão; com vertex_colors ou uvs+texture, interpola por
+        baricêntricas com correção de perspectiva. Todo pixel passa pelo z-buffer.
         """
         min_x = max(int(min(a[0], b[0], c[0])), 0)
         max_x = min(int(max(a[0], b[0], c[0])) + 1, GL.width)
@@ -220,30 +283,45 @@ class GL:
                 px, py = x + 0.5, y + 0.5
                 if not GL.inside(a, b, c, px, py):
                     continue
-                if vertex_colors is None and uvs is None:
-                    GL.draw2D((x, y), colors)
-                    continue
 
                 # Pesos baricêntricos reaproveitando as mesmas funções de aresta do inside()
                 wa = edge(b, c, px, py) / area
                 wb = edge(c, a, px, py) / area
                 wc = 1 - wa - wb
 
-                if vertex_colors is not None:
-                    rgb = [wa * vertex_colors[0][i] + wb * vertex_colors[1][i] + wc * vertex_colors[2][i]
-                           for i in range(3)]
-                else:
-                    u = wa * uvs[0][0] + wb * uvs[1][0] + wc * uvs[2][0]
-                    v = wa * uvs[0][1] + wb * uvs[1][1] + wc * uvs[2][1]
-                    th, tw = texture.shape[0], texture.shape[1]
-                    # ponytail: amostragem "nearest" sem filtragem; nenhum exemplo desta
-                    # etapa usa textura, então a convenção de eixo u/v não foi validada
-                    # visualmente. Ajustar se um exemplo com ImageTexture falhar.
-                    tx = min(max(int(u * tw), 0), tw - 1)
-                    ty = min(max(int((1 - v) * th), 0), th - 1)
-                    rgb = [channel / 255 for channel in texture[ty, tx][:3]]
+                # O Z do z-buffer é interpolado linearmente na tela (sem correção de
+                # perspectiva: essa é uma propriedade do Z pós-projeção).
+                profundidade = wa * a[2] + wb * b[2] + wc * c[2]
+                if not GL.visivel_no_z_buffer(x, y, profundidade):
+                    continue
 
-                GL.draw2D((x, y), {**colors, "emissiveColor": rgb})
+                if vertex_colors is None and uvs is None:
+                    rgb = colors["emissiveColor"]
+                else:
+                    # Interpolação com correção de perspectiva: cada peso baricêntrico é
+                    # dividido pelo w do respectivo vértice antes de somar (aula09).
+                    correcao = wa / a[3] + wb / b[3] + wc / c[3]
+
+                    if vertex_colors is not None:
+                        rgb = [(wa * vertex_colors[0][i] / a[3]
+                                + wb * vertex_colors[1][i] / b[3]
+                                + wc * vertex_colors[2][i] / c[3]) / correcao
+                               for i in range(3)]
+                    else:
+                        u = (wa * uvs[0][0] / a[3] + wb * uvs[1][0] / b[3]
+                             + wc * uvs[2][0] / c[3]) / correcao
+                        v = (wa * uvs[0][1] / a[3] + wb * uvs[1][1] / b[3]
+                             + wc * uvs[2][1] / c[3]) / correcao
+                        # GPU.load_texture já transpõe a imagem (Image.TRANSPOSE), então
+                        # o primeiro eixo de texture é a largura original (eixo u) e o
+                        # segundo é a altura original (eixo v, com linha 0 = topo do PNG).
+                        tw, th = texture.shape[0], texture.shape[1]
+                        # amostragem "nearest", sem filtragem (mipmap fica para depois)
+                        tx = min(max(int(u * tw), 0), tw - 1)
+                        ty = min(max(int((1 - v) * th), 0), th - 1)
+                        rgb = [channel / 255 for channel in texture[tx, ty][:3]]
+
+                GL.escreve_pixel_com_transparencia(x, y, rgb, colors["transparency"])
 
     @staticmethod
     def split_strips(indices):
@@ -280,7 +358,8 @@ class GL:
         # No TriangleSet os triângulos são informados individualmente, assim os três
         # primeiros pontos definem um triângulo, os três próximos pontos definem um novo
         # triângulo, e assim por diante.
-
+        
+        #fazer lista em paralelo para cores 
         mvp = GL.mvp_matrix()
         for tri in batched(point, 9):
             a, b, c = (GL.project(p, mvp) for p in batched(tri, 3))
